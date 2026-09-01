@@ -1,0 +1,6 @@
+{
+  "name": "slate-hcp-ferda-workstation",
+  "token": "CHANGE_THIS_TO_MATCH_SERVER_client_token",
+  "server_url": "http://127.0.0.1:8000",
+  "notes": "Project files are at /N/slate/dkountou/analysis/lfo_distinct_revision; hcp_ferda_v2 is the latest work. Use Codex to inspect, program, and ask questions about this code. Set CODEX_SESSION_ID to the specific existing session ID before invoking any session-resume command; no session ID was supplied in this template. Make a separate focused git commit for Codex/code work, distinct from research-document commits."
+}

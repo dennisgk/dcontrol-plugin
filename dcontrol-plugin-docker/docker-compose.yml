@@ -1,0 +1,14 @@
+services:
+  dcontrol-plugin:
+    build:
+      context: ..
+      dockerfile: dcontrol-plugin-docker/Dockerfile
+    ports:
+      - "21039:8000"
+    volumes:
+      - ./config.json:/app/config.json:ro
+      - dcontrol-storage:/app/storage
+    restart: unless-stopped
+
+volumes:
+  dcontrol-storage:
