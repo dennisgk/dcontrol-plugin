@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import subprocess
+import tempfile
 import urllib.request
 from pathlib import Path
 
@@ -23,11 +25,33 @@ def execute(method: str, params: dict) -> dict:
     if method == "notes":
         return {"name": CONFIG["name"], "notes": CONFIG.get("notes", "")}
     if method == "command":
+        script_path: Path | None = None
         try:
-            done = subprocess.run(params["command"], shell=True, cwd=ROOT, capture_output=True, text=True, timeout=int(params.get("timeout_seconds", 120)))
+            # A script file preserves multiline commands and avoids command-line escaping.
+            is_windows = os.name == "nt"
+            suffix = ".ps1" if is_windows else ".sh"
+            encoding = "utf-8-sig" if is_windows else "utf-8"
+            with tempfile.NamedTemporaryFile(mode="w", encoding=encoding, suffix=suffix, prefix="dcontrol-", delete=False) as script:
+                script.write(params["command"])
+                script_path = Path(script.name)
+            launcher = (
+                ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script_path)]
+                if is_windows
+                else ["/bin/bash", str(script_path)]
+            )
+            done = subprocess.run(
+                launcher,
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                timeout=int(params.get("timeout_seconds", 120)),
+            )
             return {"returncode": done.returncode, "stdout": done.stdout, "stderr": done.stderr}
         except subprocess.TimeoutExpired as exc:
             return {"returncode": None, "stdout": exc.stdout or "", "stderr": "Command timed out"}
+        finally:
+            if script_path:
+                script_path.unlink(missing_ok=True)
     if method == "write_from_server":
         destination = Path(params["path"]).expanduser()
         destination.parent.mkdir(parents=True, exist_ok=True)
