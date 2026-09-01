@@ -1,4 +1,4 @@
-"""Personal SSE MCP bridge for WebSocket-connected workstation agents."""
+"""Unauthenticated Streamable HTTP MCP bridge for WebSocket workstation agents."""
 from __future__ import annotations
 
 import asyncio
@@ -16,14 +16,17 @@ ROOT = Path(__file__).resolve().parent
 CONFIG = json.loads((ROOT / "config.json").read_text(encoding="utf-8"))
 STORE = (ROOT / CONFIG.get("storage_dir", "./storage")).resolve()
 STORE.mkdir(parents=True, exist_ok=True)
+# Kept in config.json at the user's request. It is intentionally not used for MCP auth.
 MCP_TOKEN = CONFIG["mcp_token"]
 CLIENT_TOKEN = CONFIG["client_token"]
 TTL = int(CONFIG.get("upload_ttl_seconds", 3600))
+PUBLIC_URL = CONFIG.get("public_url", f"http://127.0.0.1:{CONFIG.get('port', 8000)}").rstrip("/")
 
 app = FastAPI(title="dcontrol-plugin")
 clients: dict[str, WebSocket] = {}
 pending: dict[str, asyncio.Future] = {}
 transports: dict[str, asyncio.Queue[str]] = {}
+streamable_sessions: set[str] = set()
 files: dict[str, dict[str, Any]] = {}
 
 TOOLS = [
@@ -34,13 +37,6 @@ TOOLS = [
     {"name": "complete_upload", "description": "Tell the client to copy a completed upload to its requested path.", "inputSchema": {"type": "object", "properties": {"upload_id": {"type": "string"}}, "required": ["upload_id"]}},
     {"name": "create_download", "description": "Fetch a client file and return a temporary bearer-protected download URL.", "inputSchema": {"type": "object", "properties": {"name": {"type": "string"}, "path": {"type": "string"}}, "required": ["name", "path"]}},
 ]
-
-def authorized(value: str | None) -> bool:
-    return bool(value and secrets.compare_digest(value.removeprefix("Bearer ").strip(), MCP_TOKEN))
-
-def require_token(value: str | None) -> None:
-    if not authorized(value):
-        raise HTTPException(401, "Bearer MCP token required")
 
 def result(request_id: Any, value: Any) -> dict[str, Any]:
     return {"jsonrpc": "2.0", "id": request_id, "result": value}
@@ -71,7 +67,7 @@ async def invoke(name: str, args: dict[str, Any]) -> Any:
     if name == "create_upload":
         file_id = str(uuid.uuid4())
         files[file_id] = {"name": args["name"], "path": args["path"], "kind": "upload", "expires": time.time() + TTL, "blob": STORE / file_id}
-        return {"upload_id": file_id, "method": "PUT", "url": f"/files/upload/{file_id}", "headers": {"Authorization": "Bearer <mcp_token>"}, "next_step": "PUT file bytes, then call complete_upload with upload_id."}
+        return {"upload_id": file_id, "method": "PUT", "url": f"{PUBLIC_URL}/files/upload/{file_id}", "next_step": "PUT file bytes to the URL, then call complete_upload with upload_id."}
     if name == "complete_upload":
         entry = files.get(args["upload_id"])
         if not entry or entry["kind"] != "upload" or not entry["blob"].is_file():
@@ -85,7 +81,7 @@ async def invoke(name: str, args: dict[str, Any]) -> Any:
         await call_client(args["name"], "copy_to_server", {"path": args["path"], "destination": f"/agent-files/{file_id}"})
         if not blob.is_file():
             raise ValueError("Client did not provide the file")
-        return {"download_id": file_id, "url": f"/files/download/{file_id}", "headers": {"Authorization": "Bearer <mcp_token>"}, "expires_in_seconds": TTL}
+        return {"download_id": file_id, "url": f"{PUBLIC_URL}/files/download/{file_id}", "expires_in_seconds": TTL}
     raise ValueError(f"Unknown tool '{name}'")
 
 async def handle_mcp(message: dict[str, Any]) -> dict[str, Any] | None:
@@ -103,9 +99,25 @@ async def handle_mcp(message: dict[str, Any]) -> dict[str, Any] | None:
             return result(request_id, {"content": [{"type": "text", "text": str(exc)}], "isError": True})
     return {"jsonrpc": "2.0", "id": request_id, "error": {"code": -32601, "message": f"Method not found: {method}"}}
 
-@app.get("/sse")
-async def sse(authorization: str | None = Header(default=None)):
-    require_token(authorization)
+@app.post("/mcp")
+async def mcp(request: Request, mcp_session_id: str | None = Header(default=None)):
+    """MCP Streamable HTTP transport. No MCP authentication by design."""
+    message = await request.json()
+    if message.get("method") == "initialize":
+        session_id = str(uuid.uuid4())
+        streamable_sessions.add(session_id)
+    else:
+        session_id = mcp_session_id
+        if not session_id or session_id not in streamable_sessions:
+            raise HTTPException(400, "Initialize first and send Mcp-Session-Id")
+    response = await handle_mcp(message)
+    if response is None:
+        return Response(status_code=202, headers={"Mcp-Session-Id": session_id})
+    return JSONResponse(response, headers={"Mcp-Session-Id": session_id})
+
+@app.get("/sse", deprecated=True)
+async def sse():
+    """Legacy, unauthenticated SSE transport retained for older MCP clients."""
     session_id, queue = str(uuid.uuid4()), asyncio.Queue()
     transports[session_id] = queue
     async def events():
@@ -118,8 +130,7 @@ async def sse(authorization: str | None = Header(default=None)):
     return StreamingResponse(events(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 @app.post("/messages")
-async def messages(request: Request, session_id: str, authorization: str | None = Header(default=None)):
-    require_token(authorization)
+async def messages(request: Request, session_id: str):
     queue = transports.get(session_id)
     if not queue:
         raise HTTPException(404, "SSE session not found")
@@ -154,16 +165,14 @@ async def client_ws(ws: WebSocket):
             clients.pop(name, None)
 
 @app.put("/files/upload/{file_id}")
-async def upload(file_id: str, request: Request, authorization: str | None = Header(default=None)):
-    require_token(authorization)
+async def upload(file_id: str, request: Request):
     entry = files.get(file_id)
     if not entry or entry["kind"] != "upload" or entry["expires"] < time.time(): raise HTTPException(404, "Expired upload")
     entry["blob"].write_bytes(await request.body())
     return {"upload_id": file_id, "status": "stored"}
 
 @app.get("/files/download/{file_id}")
-async def download(file_id: str, authorization: str | None = Header(default=None)):
-    require_token(authorization)
+async def download(file_id: str):
     entry = files.get(file_id)
     if not entry or entry["kind"] != "download" or entry["expires"] < time.time() or not entry["blob"].is_file(): raise HTTPException(404, "Expired download")
     return Response(entry["blob"].read_bytes(), media_type="application/octet-stream", headers={"Content-Disposition": f'attachment; filename="{Path(entry["path"]).name}"'})
@@ -182,18 +191,6 @@ async def agent_put(file_id: str, request: Request, x_client_token: str | None =
     if not entry or entry["expires"] < time.time(): raise HTTPException(404, "Expired file")
     entry["blob"].write_bytes(await request.body())
     return {"file_id": file_id, "status": "stored"}
-
-@app.get("/.well-known/oauth-protected-resource")
-async def protected_resource(): return {"resource": "/", "authorization_servers": ["/.well-known/oauth-authorization-server"]}
-
-@app.get("/.well-known/oauth-authorization-server")
-async def oauth_metadata(): return {"issuer": "/", "token_endpoint": "/oauth/token", "grant_types_supported": ["client_credentials"], "token_endpoint_auth_methods_supported": ["client_secret_post"]}
-
-@app.post("/oauth/token")
-async def oauth_token(request: Request):
-    form = await request.form()
-    if form.get("grant_type") != "client_credentials" or not secrets.compare_digest(str(form.get("client_secret", "")), MCP_TOKEN): raise HTTPException(401, "Invalid client secret")
-    return JSONResponse({"access_token": MCP_TOKEN, "token_type": "Bearer", "expires_in": 86400})
 
 if __name__ == "__main__":
     import uvicorn

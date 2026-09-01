@@ -1,7 +1,8 @@
 {
   "host": "0.0.0.0",
   "port": 8000,
-  "mcp_token": "CHANGE_THIS_TO_A_LONG_RANDOM_MCP_TOKEN",
+  "public_url": "http://127.0.0.1:8000",
+  "mcp_token": "KEPT_BUT_CURRENTLY_UNUSED",
   "client_token": "CHANGE_THIS_TO_A_LONG_RANDOM_CLIENT_TOKEN",
   "storage_dir": "./storage",
   "upload_ttl_seconds": 3600

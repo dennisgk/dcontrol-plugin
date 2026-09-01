@@ -1,6 +1,6 @@
 # Docker server
 
-Edit `config.json` first. Its `mcp_token` and `client_token` must have the same values as the matching local server/client configuration. Then run:
+Edit `config.json` first. Only `client_token` must match the client configuration; `mcp_token` is intentionally unused. Then run:
 
 ```powershell
 cd dcontrol-plugin-docker
