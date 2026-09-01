@@ -16,6 +16,13 @@ ROOT = Path(__file__).resolve().parent
 CONFIG = json.loads((ROOT / "config.json").read_text(encoding="utf-8"))
 SERVER = CONFIG["server_url"].rstrip("/")
 WS_URL = SERVER.replace("https://", "wss://").replace("http://", "ws://") + "/client-ws?token=" + CONFIG["token"]
+MAX_CONCURRENT_COMMANDS = int(CONFIG.get("max_concurrent_commands", 0))
+
+def output_text(value: str | bytes | None) -> str:
+    """TimeoutExpired may carry bytes even when subprocess text mode is enabled."""
+    if value is None:
+        return ""
+    return value.decode("utf-8", errors="replace") if isinstance(value, bytes) else value
 
 def server_request(path: str, method: str = "GET", data: bytes | None = None) -> bytes:
     request = urllib.request.Request(SERVER + path, data=data, method=method, headers={"X-Client-Token": CONFIG["token"]})
@@ -47,9 +54,9 @@ def execute(method: str, params: dict) -> dict:
                 text=True,
                 timeout=int(params.get("timeout_seconds", 120)),
             )
-            return {"returncode": done.returncode, "stdout": done.stdout, "stderr": done.stderr}
+            return {"returncode": done.returncode, "stdout": output_text(done.stdout), "stderr": output_text(done.stderr)}
         except subprocess.TimeoutExpired as exc:
-            return {"returncode": None, "stdout": exc.stdout or "", "stderr": "Command timed out"}
+            return {"returncode": None, "stdout": output_text(exc.stdout), "stderr": f"Command timed out after {params.get('timeout_seconds', 120)} seconds.\n{output_text(exc.stderr)}"}
         finally:
             if script_path:
                 script_path.unlink(missing_ok=True)
@@ -65,6 +72,28 @@ def execute(method: str, params: dict) -> dict:
         return {"uploaded": str(source), "bytes": source.stat().st_size}
     raise ValueError(f"Unknown request: {method}")
 
+async def handle_request(ws, message: dict, command_slots: asyncio.Semaphore | None, send_lock: asyncio.Lock) -> None:
+    """Execute one request without blocking the WebSocket receive loop."""
+    try:
+        if message["method"] == "command" and command_slots is not None:
+            async with command_slots:
+                value = await asyncio.to_thread(execute, message["method"], message.get("params", {}))
+        else:
+            value = await asyncio.to_thread(execute, message["method"], message.get("params", {}))
+        reply = {"type": "response", "id": message["id"], "result": value}
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        reply = {"type": "response", "id": message.get("id"), "result": {"error": str(exc)}}
+    try:
+        # Multiple background tasks may finish together; WebSocket sends stay ordered.
+        async with send_lock:
+            await ws.send(json.dumps(reply))
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        print(f"Could not send response {message.get('id')} after disconnect: {exc}")
+
 async def run() -> None:
     """Keep the agent alive through temporary Internet/server interruptions."""
     retry_seconds = 1
@@ -74,15 +103,16 @@ async def run() -> None:
                 await ws.send(json.dumps({"type": "hello", "name": CONFIG["name"]}))
                 print(f"Connected as {CONFIG['name']}")
                 retry_seconds = 1
+                command_slots = asyncio.Semaphore(MAX_CONCURRENT_COMMANDS) if MAX_CONCURRENT_COMMANDS > 0 else None
+                send_lock = asyncio.Lock()
+                background_tasks: set[asyncio.Task] = set()
                 async for raw in ws:
                     message = json.loads(raw)
                     if message.get("type") != "request": continue
-                    try:
-                        value = await asyncio.to_thread(execute, message["method"], message.get("params", {}))
-                        reply = {"type": "response", "id": message["id"], "result": value}
-                    except Exception as exc:
-                        reply = {"type": "response", "id": message["id"], "result": {"error": str(exc)}}
-                    await ws.send(json.dumps(reply))
+                    task = asyncio.create_task(handle_request(ws, message, command_slots, send_lock))
+                    background_tasks.add(task)
+                    task.add_done_callback(background_tasks.discard)
+                raise ConnectionError("WebSocket connection closed")
         except asyncio.CancelledError:
             # A real application shutdown should stop cleanly; network errors do not arrive here.
             raise

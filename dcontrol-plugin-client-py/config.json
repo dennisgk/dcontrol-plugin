@@ -2,5 +2,6 @@
   "name": "wordtex-revision-workstation",
   "token": "dennisClientToken",
   "server_url": "https://dcp.kountouris.org",
+  "max_concurrent_commands": 0,
   "notes": "This is a windows machine. Comment files are in C:\\Users\\Owner\\Desktop\\Compositions\\TONG\\adam_final\\lfo_distinct_revision\\wordtex-projects\\iterations\\01. Use this client for the research revision. Work in C:\\Users\\Owner\\Desktop\\Compositions\\TONG\\adam_final\\lfo_distinct_revision\\wordtex-projects\\lfo and C:\\Users\\Owner\\Desktop\\Compositions\\TONG\\adam_final\\lfo_distinct_revision\\wordtex-projects\\lfo-response. Edit files there and use the WordTeX compiler according to each project's existing README/scripts. Before significant work and again when it is complete, inspect git status in C:\\Users\\Owner\\Desktop\\Compositions\\TONG\\adam_final\\lfo_distinct_revision\\wordtex-projects, then make a focused git commit so progress is not lost. Do not commit secrets or unrelated changes. WordTeX and its compiler are in C:\\Users\\Owner\\Desktop\\Compositions\\TONG\\adam_final\\lfo_distinct_revision\\wordtex."
 }
