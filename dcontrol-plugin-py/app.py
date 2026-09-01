@@ -20,6 +20,7 @@ STORE.mkdir(parents=True, exist_ok=True)
 MCP_TOKEN = CONFIG["mcp_token"]
 CLIENT_TOKEN = CONFIG["client_token"]
 TTL = int(CONFIG.get("upload_ttl_seconds", 3600))
+CLIENT_REQUEST_TIMEOUT = int(CONFIG.get("client_request_timeout_seconds", 900))
 PUBLIC_URL = CONFIG.get("public_url", f"http://127.0.0.1:{CONFIG.get('port', 8000)}").rstrip("/")
 
 app = FastAPI(title="dcontrol-plugin")
@@ -53,7 +54,7 @@ async def call_client(name: str, method: str, params: dict[str, Any]) -> Any:
     pending[request_id] = future
     try:
         await ws.send_json({"type": "request", "id": request_id, "method": method, "params": params})
-        return await asyncio.wait_for(future, timeout=150)
+        return await asyncio.wait_for(future, timeout=CLIENT_REQUEST_TIMEOUT)
     finally:
         pending.pop(request_id, None)
 
@@ -150,8 +151,14 @@ async def client_ws(ws: WebSocket):
         name = hello.get("name")
         if hello.get("type") != "hello" or not isinstance(name, str) or not name:
             await ws.close(code=4400); return
-        if name in clients:
-            await ws.close(code=4409); return
+        # A reconnect after a Wi-Fi/proxy interruption may arrive before the stale
+        # connection's disconnect handler has run. Prefer the new connection.
+        old_ws = clients.get(name)
+        if old_ws and old_ws is not ws:
+            try:
+                await old_ws.close(code=1012, reason="Client reconnected")
+            except Exception:
+                pass
         clients[name] = ws
         await ws.send_json({"type": "ready", "name": name})
         while True:

@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import random
 import subprocess
 import tempfile
 import urllib.request
@@ -65,11 +66,14 @@ def execute(method: str, params: dict) -> dict:
     raise ValueError(f"Unknown request: {method}")
 
 async def run() -> None:
+    """Keep the agent alive through temporary Internet/server interruptions."""
+    retry_seconds = 1
     while True:
         try:
-            async with websockets.connect(WS_URL, ping_interval=20, ping_timeout=20, max_size=None) as ws:
+            async with websockets.connect(WS_URL, ping_interval=15, ping_timeout=30, close_timeout=5, max_size=None) as ws:
                 await ws.send(json.dumps({"type": "hello", "name": CONFIG["name"]}))
                 print(f"Connected as {CONFIG['name']}")
+                retry_seconds = 1
                 async for raw in ws:
                     message = json.loads(raw)
                     if message.get("type") != "request": continue
@@ -79,9 +83,16 @@ async def run() -> None:
                     except Exception as exc:
                         reply = {"type": "response", "id": message["id"], "result": {"error": str(exc)}}
                     await ws.send(json.dumps(reply))
+        except asyncio.CancelledError:
+            # A real application shutdown should stop cleanly; network errors do not arrive here.
+            raise
         except Exception as exc:
-            print(f"Disconnected: {exc}; retrying in 5 seconds")
-            await asyncio.sleep(5)
+            # The WebSocket library reports dropped Wi-Fi, server restarts, and proxy closes here.
+            # Randomized backoff prevents rapid retry loops while an Internet connection is unavailable.
+            wait_seconds = min(60, retry_seconds) + random.uniform(0, 1)
+            print(f"Disconnected: {exc}; retrying in {wait_seconds:.1f} seconds")
+            await asyncio.sleep(wait_seconds)
+            retry_seconds = min(60, retry_seconds * 2)
 
 if __name__ == "__main__":
     asyncio.run(run())
